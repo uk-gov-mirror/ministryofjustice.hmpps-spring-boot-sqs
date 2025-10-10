@@ -68,6 +68,11 @@ class TraceExtractingMessageInterceptor(private val objectMapper: ObjectMapper) 
 
   override fun afterProcessing(message: Message<Any>, t: Throwable?) {
     (message.headers["span"] as Span?)?.run {
+      // Set standard OpenTelemetry messaging attributes
+      this.setAttribute("messaging.system", "aws_sqs")
+      this.setAttribute("messaging.operation.type", "receive")
+      this.setAttribute("messaging.operation.name", "receiveMessage")
+      
       if (t != null) {
         // by grabbing the cause and recording the exception here we can then use app insights to filter out
         // java.util.concurrent.CompletionException exception messages separately.  This stops the exception being

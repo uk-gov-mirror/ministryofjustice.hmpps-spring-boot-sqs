@@ -21,11 +21,11 @@ import software.amazon.awssdk.services.sqs.model.MessageAttributeValue as SqsMes
  */
 class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
   override fun modifyRequest(context: Context.ModifyRequest?, executionAttributes: ExecutionAttributes?) = when (val request = context?.request()) {
-    is PublishRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue()) {
+    is PublishRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue(), "aws.sns", "publish") {
       request.toBuilder().messageAttributes(request.messageAttributes().withSnsTelemetryContext()).build()
     }
 
-    is PublishBatchRequest -> withSpan {
+    is PublishBatchRequest -> withSpan(system = "aws.sns", operationName = "publishBatch") {
       request.toBuilder().publishBatchRequestEntries(
         request.publishBatchRequestEntries().map { entry ->
           entry.toBuilder().messageAttributes(entry.messageAttributes().withSnsTelemetryContext()).build()
@@ -33,11 +33,11 @@ class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
       ).build()
     }
 
-    is SendMessageRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue()) {
+    is SendMessageRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue(), "aws_sqs", "sendMessage") {
       request.toBuilder().messageAttributes(request.messageAttributes().withSqsTelemetryContext()).build()
     }
 
-    is SendMessageBatchRequest -> withSpan {
+    is SendMessageBatchRequest -> withSpan(system = "aws_sqs", operationName = "sendMessageBatch") {
       request.toBuilder().entries(
         request.entries().map { entry ->
           entry.toBuilder().messageAttributes(entry.messageAttributes().withSqsTelemetryContext()).build()
@@ -48,16 +48,22 @@ class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
     else -> request
   }
 
-  private fun <T> withSpan(eventType: String? = null, block: () -> T): T = GlobalOpenTelemetry
+  private fun <T> withSpan(eventType: String? = null, system: String, operationName: String, block: () -> T): T = GlobalOpenTelemetry
     .getTracer("hmpps-sqs")
     .spanBuilder(eventType?.let { "PUBLISH $it" } ?: "PUBLISH")
     .setSpanKind(SpanKind.PRODUCER)
     .startSpan()
-    .let {
+    .let { span ->
       try {
-        it.makeCurrent().use { block() }
+        span.makeCurrent().use { 
+          // Set standard OpenTelemetry messaging attributes
+          span.setAttribute("messaging.system", system)
+          span.setAttribute("messaging.operation.type", "send")
+          span.setAttribute("messaging.operation.name", operationName)
+          block() 
+        }
       } finally {
-        it.end()
+        span.end()
       }
     }
 

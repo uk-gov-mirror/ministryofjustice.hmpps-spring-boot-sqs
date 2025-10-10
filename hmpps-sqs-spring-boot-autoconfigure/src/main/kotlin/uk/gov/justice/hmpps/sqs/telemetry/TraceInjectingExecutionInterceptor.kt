@@ -21,11 +21,21 @@ import software.amazon.awssdk.services.sqs.model.MessageAttributeValue as SqsMes
  */
 class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
   override fun modifyRequest(context: Context.ModifyRequest?, executionAttributes: ExecutionAttributes?) = when (val request = context?.request()) {
-    is PublishRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue(), "aws.sns", "publish") {
+    is PublishRequest -> withSpan(
+      eventType = request.messageAttributes()["eventType"]?.stringValue(),
+      system = "aws.sns", 
+      operationName = "publish",
+      topicArn = request.topicArn()
+    ) {
       request.toBuilder().messageAttributes(request.messageAttributes().withSnsTelemetryContext()).build()
     }
 
-    is PublishBatchRequest -> withSpan(system = "aws.sns", operationName = "publishBatch") {
+    is PublishBatchRequest -> withSpan(
+      system = "aws.sns", 
+      operationName = "publishBatch",
+      topicArn = request.topicArn(),
+      batchSize = request.publishBatchRequestEntries().size
+    ) {
       request.toBuilder().publishBatchRequestEntries(
         request.publishBatchRequestEntries().map { entry ->
           entry.toBuilder().messageAttributes(entry.messageAttributes().withSnsTelemetryContext()).build()
@@ -33,11 +43,21 @@ class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
       ).build()
     }
 
-    is SendMessageRequest -> withSpan(request.messageAttributes()["eventType"]?.stringValue(), "aws_sqs", "sendMessage") {
+    is SendMessageRequest -> withSpan(
+      eventType = request.messageAttributes()["eventType"]?.stringValue(),
+      system = "aws_sqs", 
+      operationName = "sendMessage",
+      queueUrl = request.queueUrl()
+    ) {
       request.toBuilder().messageAttributes(request.messageAttributes().withSqsTelemetryContext()).build()
     }
 
-    is SendMessageBatchRequest -> withSpan(system = "aws_sqs", operationName = "sendMessageBatch") {
+    is SendMessageBatchRequest -> withSpan(
+      system = "aws_sqs", 
+      operationName = "sendMessageBatch",
+      queueUrl = request.queueUrl(),
+      batchSize = request.entries().size
+    ) {
       request.toBuilder().entries(
         request.entries().map { entry ->
           entry.toBuilder().messageAttributes(entry.messageAttributes().withSqsTelemetryContext()).build()
@@ -48,7 +68,15 @@ class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
     else -> request
   }
 
-  private fun <T> withSpan(eventType: String? = null, system: String, operationName: String, block: () -> T): T = GlobalOpenTelemetry
+  private fun <T> withSpan(
+    eventType: String? = null, 
+    system: String, 
+    operationName: String,
+    queueUrl: String? = null,
+    topicArn: String? = null,
+    batchSize: Int? = null,
+    block: () -> T
+  ): T = GlobalOpenTelemetry
     .getTracer("hmpps-sqs")
     .spanBuilder(eventType?.let { "PUBLISH $it" } ?: "PUBLISH")
     .setSpanKind(SpanKind.PRODUCER)
@@ -60,6 +88,32 @@ class TraceInjectingExecutionInterceptor : ExecutionInterceptor {
           span.setAttribute("messaging.system", system)
           span.setAttribute("messaging.operation.type", "send")
           span.setAttribute("messaging.operation.name", operationName)
+          
+          // Enhanced attributes
+          span.setAttribute("server.address", if (system == "aws_sqs") "sqs.amazonaws.com" else "sns.amazonaws.com")
+          span.setAttribute("server.port", 443)
+          
+          // Destination name from URL/ARN
+          queueUrl?.let { url ->
+            val queueName = url.substringAfterLast("/")
+            span.setAttribute("messaging.destination.name", queueName)
+          }
+          
+          topicArn?.let { arn ->
+            val topicName = arn.substringAfterLast(":")
+            span.setAttribute("messaging.destination.name", topicName)
+          }
+          
+          // Batch size
+          batchSize?.let { size ->
+            span.setAttribute("messaging.batch.message_count", size)
+          }
+          
+          // Conversation ID from eventType
+          eventType?.let { 
+            span.setAttribute("messaging.message.conversation_id", it)
+          }
+          
           block() 
         }
       } finally {
